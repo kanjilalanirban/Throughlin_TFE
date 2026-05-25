@@ -117,27 +117,64 @@ resource "aws_iam_role" "ci_apply" {
 
 # PowerUserAccess covers everything the ephemeral stack provisions (VPC, RDS,
 # Fargate, Lambda, ALB, S3, Cognito, EventBridge, SSM, Secrets Manager values)
-# without granting IAM admin. IAM resources for the ephemeral stack are created
-# at bootstrap (the task/lambda execution roles), not by apply, so PowerUser is
-# sufficient. Tighten later if scope grows.
+# without granting IAM admin.
 resource "aws_iam_role_policy_attachment" "ci_apply_poweruser" {
   role       = aws_iam_role.ci_apply.name
   policy_arn = "arn:aws:iam::aws:policy/PowerUserAccess"
 }
 
-# Apply also needs IAM PassRole for the ECS task execution role, lambda
-# execution roles, etc. that the ephemeral stack assigns to its resources.
-resource "aws_iam_role_policy" "ci_apply_passrole" {
-  name = "passrole-ephemeral-execution-roles"
+# The ephemeral stack creates its own task/lambda execution roles inside the
+# fargate-service and lambda-ingester modules (not in bootstrap). The apply
+# role needs IAM CRUD on those roles, plus PassRole to attach them. All
+# scoped to `companybrain-phase0-*` so the apply role cannot touch bootstrap
+# IAM resources (which carry the `companybrain-ci-*` / `companybrain-app-*`
+# naming prefix).
+resource "aws_iam_role_policy" "ci_apply_iam_for_ephemeral" {
+  name = "manage-ephemeral-iam-roles"
   role = aws_iam_role.ci_apply.id
 
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [{
-      Effect   = "Allow"
-      Action   = "iam:PassRole"
-      Resource = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/companybrain-phase0-*"
-    }]
+    Statement = [
+      {
+        Sid    = "ManageEphemeralRoles"
+        Effect = "Allow"
+        Action = [
+          "iam:CreateRole",
+          "iam:DeleteRole",
+          "iam:GetRole",
+          "iam:UpdateRole",
+          "iam:UpdateRoleDescription",
+          "iam:UpdateAssumeRolePolicy",
+          "iam:TagRole",
+          "iam:UntagRole",
+          "iam:ListRoleTags",
+          "iam:AttachRolePolicy",
+          "iam:DetachRolePolicy",
+          "iam:PutRolePolicy",
+          "iam:DeleteRolePolicy",
+          "iam:GetRolePolicy",
+          "iam:ListRolePolicies",
+          "iam:ListAttachedRolePolicies",
+          "iam:ListInstanceProfilesForRole",
+          "iam:PassRole",
+        ]
+        Resource = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/companybrain-phase0-*"
+      },
+      {
+        # The aws_iam_role_policy_attachment resource needs to look up which
+        # AWS-managed policies are attached; that requires GetPolicy + GetPolicyVersion
+        # against the managed policy ARNs we attach (AmazonECSTaskExecutionRolePolicy,
+        # AWSLambdaBasicExecutionRole, AWSLambdaVPCAccessExecutionRole).
+        Sid    = "ReadManagedPoliciesAttachedToEphemeralRoles"
+        Effect = "Allow"
+        Action = [
+          "iam:GetPolicy",
+          "iam:GetPolicyVersion",
+        ]
+        Resource = "arn:aws:iam::aws:policy/*"
+      },
+    ]
   })
 }
 
