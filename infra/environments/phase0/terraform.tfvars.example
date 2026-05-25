@@ -1,0 +1,20 @@
+# Copy to terraform.tfvars (gitignored) to override defaults locally.
+# All values shown here are the in-code defaults; uncomment + edit to change.
+
+# region            = "ca-central-1"
+# name_prefix       = "companybrain-phase0"
+
+# backend_image_tag = "latest"
+# # or pin to a SHA:
+# # backend_image_tag = "sha-abc123"
+
+# ingester_image_tags = {
+#   jira       = "latest"
+#   github     = "latest"
+#   hris       = "latest"
+#   normalizer = "latest"
+# }
+
+# jira_schedule   = "rate(30 minutes)"
+# github_schedule = "rate(30 minutes)"
+# hris_schedule   = "cron(0 6 * * ? *)"

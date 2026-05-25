@@ -1,0 +1,75 @@
+name: Drift check (weekly)
+
+# Runs `terraform plan` on the live stack (if any) every Monday at 13:00 UTC.
+# Non-empty plan = drift = something was changed outside Terraform, OR the
+# stack is up and someone forgot `make down` (which is also a flag worth firing).
+on:
+  schedule:
+    - cron: '0 13 * * 1'
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+  issues: write
+
+env:
+  TF_VERSION: '1.7.5'
+  AWS_REGION: ca-central-1
+  TF_IN_AUTOMATION: 'true'
+
+jobs:
+  drift:
+    name: plan (phase0)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_PLAN_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform init
+        working-directory: infra/environments/phase0
+        run: terraform init -input=false
+
+      - name: Terraform plan (detect drift)
+        id: plan
+        working-directory: infra/environments/phase0
+        run: |
+          set +e
+          terraform plan -input=false -detailed-exitcode -no-color > plan.txt 2>&1
+          status=$?
+          set -e
+          echo "exit_code=$status" >> $GITHUB_OUTPUT
+          # exit codes: 0 = no changes, 1 = error, 2 = changes detected (drift)
+          if [ $status -eq 2 ]; then
+            echo "drift=true" >> $GITHUB_OUTPUT
+          else
+            echo "drift=false" >> $GITHUB_OUTPUT
+          fi
+          head -c 30000 plan.txt
+          exit 0
+
+      - name: Open drift issue
+        if: steps.plan.outputs.drift == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync('infra/environments/phase0/plan.txt', 'utf8').slice(0, 30000);
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Drift detected in phase0 — ${new Date().toISOString().slice(0,10)}`,
+              body: `Weekly drift check found changes between Terraform state and live AWS.\n\nMost likely causes:\n- Stack is up and someone forgot \`make down\`\n- Manual change in the AWS console (write the Terraform now)\n- Provider version bump introduced unintended changes\n\n<details><summary>Plan output</summary>\n\n\`\`\`hcl\n${plan}\n\`\`\`\n\n</details>`,
+              labels: ['infra', 'drift']
+            });

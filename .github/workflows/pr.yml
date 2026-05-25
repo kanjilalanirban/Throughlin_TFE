@@ -1,0 +1,122 @@
+name: PR — validate & plan
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'infra/**'
+      - '.github/workflows/pr.yml'
+
+# Required for OIDC.
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+env:
+  TF_VERSION: '1.7.5'
+  AWS_REGION: ca-central-1
+  TF_IN_AUTOMATION: 'true'
+
+jobs:
+  fmt-and-validate:
+    name: fmt + validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform fmt -check
+        working-directory: infra
+        run: terraform fmt -check -recursive
+
+      - name: Terraform validate (all modules + env)
+        run: |
+          set -e
+          for dir in infra/modules/* infra/environments/phase0 infra/bootstrap; do
+            echo "::group::validate $dir"
+            cd "$dir"
+            terraform init -backend=false -input=false
+            terraform validate
+            cd - > /dev/null
+            echo "::endgroup::"
+          done
+
+  tag-compliance:
+    name: tag compliance (App tag present)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Crude but effective Phase 0 check: every resource block must be in a
+      # directory whose provider has default_tags carrying App = "mv01throu".
+      # We assert the provider config in each layer.
+      - name: Assert default_tags App="mv01throu"
+        run: |
+          set -e
+          for f in infra/bootstrap/versions.tf infra/environments/phase0/versions.tf; do
+            if ! grep -q 'App[[:space:]]*=[[:space:]]*"mv01throu"' "$f"; then
+              echo "::error file=$f::missing App = \"mv01throu\" in default_tags"
+              exit 1
+            fi
+          done
+          echo "OK: every provider config carries App = mv01throu"
+
+  plan:
+    name: plan (phase0)
+    runs-on: ubuntu-latest
+    needs: [fmt-and-validate, tag-compliance]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_PLAN_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform init
+        working-directory: infra/environments/phase0
+        run: terraform init -input=false
+
+      - name: Terraform plan
+        id: plan
+        working-directory: infra/environments/phase0
+        run: |
+          set +e
+          terraform plan -input=false -no-color -out=tfplan > plan.txt 2>&1
+          status=$?
+          set -e
+          echo "exit_code=$status" >> $GITHUB_OUTPUT
+          # Cap plan output at ~50k chars so PR comments don't explode.
+          head -c 50000 plan.txt > plan_truncated.txt
+          if [ $(wc -c < plan.txt) -gt 50000 ]; then
+            echo "" >> plan_truncated.txt
+            echo "... (truncated, full plan in run logs)" >> plan_truncated.txt
+          fi
+          exit $status
+
+      - name: Comment plan on PR
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync('infra/environments/phase0/plan_truncated.txt', 'utf8');
+            const status = '${{ steps.plan.outputs.exit_code }}' === '0' ? 'succeeded' : 'failed';
+            const body = `### terraform plan — \`phase0\` (${status})\n\n<details><summary>Plan output</summary>\n\n\`\`\`hcl\n${plan}\n\`\`\`\n\n</details>`;
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body
+            });
