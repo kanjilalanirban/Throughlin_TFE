@@ -94,9 +94,17 @@ resource "aws_iam_role" "ci_apply" {
         StringEquals = {
           "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
         }
-        # Allow only main branch refs and workflow_dispatch from main.
+        # Apply/destroy workflows declare `environment: phase0`, which makes
+        # GitHub's OIDC subject claim `environment:phase0` instead of
+        # `ref:refs/heads/main`. The Environment is the protection boundary
+        # (configurable reviewers in GitHub UI); allowing it here is the
+        # correct narrowing. Also accept main branch refs for safety in case
+        # we ever remove the environment requirement.
         StringLike = {
-          "token.actions.githubusercontent.com:sub" = "repo:${var.github_org}/${var.github_repo_tfe}:ref:refs/heads/main"
+          "token.actions.githubusercontent.com:sub" = [
+            "repo:${var.github_org}/${var.github_repo_tfe}:environment:phase0",
+            "repo:${var.github_org}/${var.github_repo_tfe}:ref:refs/heads/main",
+          ]
         }
       }
     }]
