@@ -179,8 +179,14 @@ resource "aws_iam_role_policy" "ci_apply_iam_for_ephemeral" {
 }
 
 # =============================================================================
-# App-image push role (Throughlin_app repo): can only push images to ECR.
-# Used by the backend-image build workflow in the app repo.
+# App deploy role (Throughlin_app repo): used by backend-image and
+# frontend-deploy workflows. Permissions:
+#   - ECR: push backend + ingester images
+#   - SSM: read /companybrain/phase0/* (frontend reads ALB URL + bucket name)
+#   - S3:  write to companybrain-phase0-frontend-* (uploads bundle)
+#   - ECS: force redeploy of the api service after backend image push
+# Name kept as `companybrain-app-image-push` to avoid destroy+create churn on
+# the IAM role (and the GH secret pointing at it). Phase 1 may rename.
 # =============================================================================
 resource "aws_iam_role" "app_image_push" {
   name = "companybrain-app-image-push"
@@ -210,20 +216,20 @@ resource "aws_iam_role" "app_image_push" {
 }
 
 resource "aws_iam_role_policy" "app_image_push" {
-  name = "ecr-push"
+  name = "app-deploy"
   role = aws_iam_role.app_image_push.id
 
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
       {
+        Sid    = "EcrAuth"
         Effect = "Allow"
-        Action = [
-          "ecr:GetAuthorizationToken"
-        ]
+        Action = ["ecr:GetAuthorizationToken"]
         Resource = "*"
       },
       {
+        Sid    = "EcrPushBackendAndIngesters"
         Effect = "Allow"
         Action = [
           "ecr:BatchCheckLayerAvailability",
@@ -232,13 +238,48 @@ resource "aws_iam_role_policy" "app_image_push" {
           "ecr:InitiateLayerUpload",
           "ecr:PutImage",
           "ecr:UploadLayerPart",
-          "ecr:BatchGetImage"
+          "ecr:BatchGetImage",
         ]
         Resource = concat(
           [aws_ecr_repository.backend.arn],
-          [for r in aws_ecr_repository.ingesters : r.arn]
+          [for r in aws_ecr_repository.ingesters : r.arn],
         )
-      }
+      },
+      {
+        Sid    = "ReadSsmParametersForDeploy"
+        Effect = "Allow"
+        Action = [
+          "ssm:GetParameter",
+          "ssm:GetParameters",
+          "ssm:GetParametersByPath",
+        ]
+        Resource = "arn:aws:ssm:*:${data.aws_caller_identity.current.account_id}:parameter/companybrain/phase0/*"
+      },
+      {
+        Sid    = "ListFrontendBucket"
+        Effect = "Allow"
+        Action = ["s3:ListBucket"]
+        Resource = "arn:aws:s3:::companybrain-phase0-frontend-*"
+      },
+      {
+        Sid    = "WriteToFrontendBucket"
+        Effect = "Allow"
+        Action = [
+          "s3:PutObject",
+          "s3:DeleteObject",
+          "s3:GetObject",
+        ]
+        Resource = "arn:aws:s3:::companybrain-phase0-frontend-*/*"
+      },
+      {
+        Sid    = "ForceEcsRedeployAfterImagePush"
+        Effect = "Allow"
+        Action = [
+          "ecs:DescribeServices",
+          "ecs:UpdateService",
+        ]
+        Resource = "arn:aws:ecs:*:${data.aws_caller_identity.current.account_id}:service/companybrain-phase0-cluster/companybrain-phase0-*"
+      },
     ]
   })
 }
